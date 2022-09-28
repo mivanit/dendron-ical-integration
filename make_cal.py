@@ -1,8 +1,20 @@
-"""scrape dendron events from a vault, outputs them to ical, markdown, json, jsonl
+"""scrape dendron events from a vault, outputs them to ical, markdown, json, or jsonl
 
+content will be read from the input (second argument), processed with the optional specified config (third argument), and output to stdout in the format (first argument)
 
+input can be either a python glob-parseable pattern, or a json/jsonl file (produced by this script)
+
+usage options:
+	python3 make_cal.py <output_fmt> <input_path>
+	python3 make_cal.py <output_fmt> <input_path> [config]
+	python3 make_cal.py <output_fmt> --path=<input> --cfg_path[config]
+
+writing to the file should be done via a shell redirect, for example:
+	python3 make_cal.py ical /path/to/dendron/vault > cal.ics
 
 ical file format spec: https://datatracker.ietf.org/doc/html/rfc5545
+
+by [Michael Ivanitskiy](https://mivanit.github.io)
 """
 
 from dataclasses import dataclass, asdict
@@ -17,9 +29,6 @@ import glob
 import dateparser
 from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
 
-GDRIVE_DOWNLOAD_FMT: str = "https://drive.google.com/uc?export=download&id={FILEID}"
-GDRIVE_LINK_PREFIX: str = "https://drive.google.com/file/d/"
-
 
 MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}._log]] **{title}**  
     {description}  
@@ -31,6 +40,7 @@ MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}._log]] **{title}**
 
 @dataclass
 class Config:
+	"""configuration for the script. meant to be used as a global variable"""
 	DENDRON_EVENT_TAGS: tuple[str] = ("#vtodo", "#vevent")
 	MARKDOWN_OUTPUT_FORMAT: str = MARKDOWN_OUTPUT_FORMAT
 
@@ -49,6 +59,9 @@ class Config:
 
 CFG: Config = Config()
 
+
+GDRIVE_DOWNLOAD_FMT: str = "https://drive.google.com/uc?export=download&id={FILEID}"
+GDRIVE_LINK_PREFIX: str = "https://drive.google.com/file/d/"
 
 def process_gdrive_link(link: str) -> str:
 	if link.startswith(GDRIVE_LINK_PREFIX):
@@ -387,8 +400,10 @@ def parse_dendron_event(event: str) -> dict|None:
 	evnt_done: bool = False
 	if "done" in kvmap:
 		evnt_done = bool_str_parse(kvmap["done"])
+	elif "done" in classes:
+		evnt_done = True
 	elif chk_done is not None:
-		evnt_done = (chk_done == "[x]")
+		evnt_done = ("[x]" in chk_done)
 
 	# combine and return
 	return {
@@ -416,8 +431,7 @@ def find_dendron_events_from_file(
 	with open(filename, "r", encoding="utf-8") as f:
 		for linnum, line in enumerate(f):
 			if any((tag in line) for tag in CFG.DENDRON_EVENT_TAGS):
-				todo_idx_start: int = line.find("#todo")
-				event: dict|None = parse_dendron_event(line[todo_idx_start:])
+				event: dict|None = parse_dendron_event(line)
 				if event is not None:
 					event["_file"] = filename
 					event["_line"] = linnum + 1
@@ -440,6 +454,33 @@ def glob_get_dendron_events(
 	return output
 
 
+def ical_process_value(s: str|int|float) -> str:
+	"""
+	Process a string to be safe for icalendar
+
+	from https://datatracker.ietf.org/doc/html/rfc5545, pg 45:
+
+	```
+	ESCAPED-CHAR = ("\\" / "\;" / "\," / "\n")
+          ; \\ encodes \, \n encodes newline
+          ; \; encodes ;, \, encodes ,
+	```
+
+	note: we never emit newlines with capital N because this causes problems for python. 
+	"""
+	if isinstance(s, (int, float)):
+		return str(s)
+	elif isinstance(s, str):
+		return (
+			s
+			.replace("\\", "\\\\")
+			.replace("\n", "\\n")
+			.replace(";", "\\;")
+			.replace(",", "\\,")
+		)
+	else:
+		raise TypeError(f"invalid type: {type(s) = } {s = }")
+
 
 def ical_serialize_dict(d: dict, bounder: str|None = None) -> str:
 	"""
@@ -448,9 +489,9 @@ def ical_serialize_dict(d: dict, bounder: str|None = None) -> str:
 	output: list[str] = list()
 	for k, v in d.items():
 		if isinstance(v, (str, int, float)):
-			output.append(f"{k}:{v}")
+			output.append(f"{k}:{ical_process_value(v)}")
 		elif isinstance(v, dict):
-			joined_dict_items: str = ';'.join([f'{k2}={v2}' for k2, v2 in v.items()])
+			joined_dict_items: str = ';'.join([f'{k2}={ical_process_value(v2)}' for k2, v2 in v.items()])
 			output.append(f"{k};{joined_dict_items}")
 		else:
 			raise ValueError(f"Unknown type {type(v) = } {k = } {v = }")
@@ -539,7 +580,7 @@ def general_loader(path: str, cfg_path: str|None = None) -> list[Event]:
 	
 	also, load config from the specified file if given
 	"""
-	global CFG # pylint: ignore
+	global CFG # pylint: disable=global-statement
 
 	if cfg_path is not None:
 		CFG = Config.load_file(cfg_path)
@@ -579,6 +620,7 @@ if __name__ == "__main__":
 		"ical": lambda path, cfg_path=None : create_ical_content(general_loader(path, cfg_path)),
 		"md": lambda path, cfg_path=None : create_md_content(general_loader(path, cfg_path)),
 		"markdown": lambda path, cfg_path=None : create_md_content(general_loader(path, cfg_path)),
+		"process_gdrive_link" : process_gdrive_link,
 	})
 
 
