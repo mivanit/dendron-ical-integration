@@ -1,18 +1,54 @@
-"""
+"""scrape dendron events from a vault, outputs them to ical, markdown, json, jsonl
+
+
 
 ical file format spec: https://datatracker.ietf.org/doc/html/rfc5545
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from functools import partial
+import json
 import sys
 from typing import Callable, Literal
 from datetime import datetime, timedelta, date, time
-import dateparser
 import re
 import glob
 
+import dateparser
+from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
+
 GDRIVE_DOWNLOAD_FMT: str = "https://drive.google.com/uc?export=download&id={FILEID}"
 GDRIVE_LINK_PREFIX: str = "https://drive.google.com/file/d/"
+
+
+MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}._log]] **{title}**  
+    {description}  
+    *origin:* [[{origin_file}]] (line {origin_line})  {time_str}  
+    ```py
+    {data}
+    ```
+"""
+
+@dataclass
+class Config:
+	DENDRON_EVENT_TAGS: tuple[str] = ("#vtodo", "#vevent")
+	MARKDOWN_OUTPUT_FORMAT: str = MARKDOWN_OUTPUT_FORMAT
+
+	@classmethod
+	def load(cls, data: dict) -> "Config":
+		return cls(
+			DENDRON_EVENT_TAGS = tuple(set(data.get("DENDRON_EVENT_TAGS", cls.DENDRON_EVENT_TAGS))),
+			MARKDOWN_OUTPUT_FORMAT = data.get("MARKDOWN_OUTPUT_FORMAT", cls.MARKDOWN_OUTPUT_FORMAT),
+		)
+
+	@classmethod
+	def load_file(cls, path: str) -> "Config":
+		with open(path) as f:
+			data = json.load(f)
+		return cls.load(data)
+
+CFG: Config = Config()
+
 
 def process_gdrive_link(link: str) -> str:
 	if link.startswith(GDRIVE_LINK_PREFIX):
@@ -82,7 +118,7 @@ def ical_datetime_format(dt: datetime|date) -> str:
 @dataclass(kw_only=True)
 class Event:
 	"""general event class"""
-	time_start: datetime|None
+	time_start: datetime|date|None
 	duration: timedelta|None
 	title: str
 	description: str
@@ -156,8 +192,8 @@ class Event:
 		# parse completeness
 		# ========================================
 		done: bool = False
-		if ("done" in data):
-			done = bool_str_parse(data["done"])
+		if ("_done" in data):
+			done = data["_done"]
 
 		# parse title/description
 		# ========================================
@@ -218,7 +254,7 @@ class Event:
 			"STATUS" : "CONFIRMED",
 		}
 
-	def to_md_str(self, indent: str = "      ") -> str:
+	def to_md_str(self) -> str:
 		"""serialize for writing to markdown log file"""
 		time_str: str
 		if self.time_start is not None:
@@ -230,50 +266,58 @@ class Event:
 				else:
 					time_str = self.time_start.strftime("%Y-%m-%d %H:%M") + f" to " + self.time_end.strftime("%Y-%m-%d %H:%M")
 				time_str += f" (duration: {round_timedelta_minutes(self.duration)})"
-			time_str = f"\n{indent}*time:* " + time_str + "  \n"
+			time_str = f"\n    *time:* " + time_str + "  \n"
 		else:
 			time_str = ""
 
-		return f""" - [{'x' if self.done else ' '}] [[{self.tag}._log]] **{self.title}**  \n{indent}{self.description}  \n{indent}*origin:* [[{self.data['_file']}]] (line {self.data['_line']})  {time_str}
-	  ```py
-	  {self.data}
-	  {self.allday = }
-	  ```
-	  """
+		return CFG.MARKDOWN_OUTPUT_FORMAT.format(
+			done_chk = "x" if self.done else " ",
+			tag = self.tag,
+			title = self.title,
+			description = self.description,
+			origin_file = self.data["_file"],
+			origin_line = self.data["_line"],
+			time_str = time_str,
+			data = self.data,
+		)
 
+Event.serialize = dataclass_serializer_factory(
+	Event,
+	{
+		"time_start" : lambda self: date_to_datetime(self.time_start).timestamp() if self.time_start is not None else None,
+		"time_start_readable" : lambda self: date_to_datetime(self.time_start).isoformat() if self.time_start is not None else None,
+		"duration" : lambda self: self.duration.total_seconds() if self.duration is not None else None,
+		"duration_readable" : lambda self: str(self.duration) if self.duration is not None else None,
+		"time_end" : lambda self: date_to_datetime(self.time_end).timestamp() if self.time_end is not None else None,
+		"time_end_readable" : lambda self: date_to_datetime(self.time_end).isoformat() if self.time_end is not None else None,
+	},
+) 
 
+Event.load = dataclass_loader_factory(
+	Event,
+	{
+		"time_start" : lambda data: datetime.fromtimestamp(data["time_start"]) if data["time_start"] is not None else None,
+		"duration" : lambda data: timedelta(seconds=data["duration"]) if data["duration"] is not None else None,
+	},
+	# TODO: some validation?
+)
 
-TAG_ITEMTYPE_MAP: dict[str, Callable] = {
-	"#event": Event.from_de_dict,
-	"#todo": Event.from_de_dict,
-	"#vtodo": Event.from_de_dict,
-	"#vevent" : Event.from_de_dict,
-	# "#journal": VJournal,
-}
-
-DENDRON_EVENT_TAGS: set[str] = set(TAG_ITEMTYPE_MAP.keys())
-
-DENDRON_EVENT_REGEX: re.Pattern = re.compile(r"^(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<description>.*)$")  # thx copilot :)
+DENDRON_EVENT_REGEX: re.Pattern = re.compile(r"^(?P<before>.*?)(?P<chk_done>\[[ x]\])?\s*(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<description>.*)$")  # thx copilot :)
 """
-`#todo {.c1 .c2 k1=v1 k2=v2} description`
+`--- [x] #todo.subtag {.c1 .c2 k1=v1 k2=v2} description`
 will map to
-tag = "#todo"
+before = "--- "
+chk_done = "[x]"
+tag = "#todo.subtag"
 metadata = ".class .class key=value key=value" 
 description = "description"
 
 note:
  - metadata is optional, but always in brackets if present
+ - tags should be allowed to have dots in them "."
+ - `before` can be any text
+ - `chk_done` is optional
 """
-
-# now, allow tags of the form #todo.x to work
-# so, `#todo.x description` map to
-# tag = "#todo.x"
-# metadata = None
-# description = "description"
-# but, make sure metadata still works as in DENDRON_EVENT_REGEX
-DENDRON_EVENT_REGEX_NEW: re.Pattern = re.compile(r"^(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<description>.*)$")  # thx copilot :)
-
-
 
 def parse_dendron_event(event: str) -> dict|None:
 	"""
@@ -292,12 +336,13 @@ def parse_dendron_event(event: str) -> dict|None:
 	"""	
 
 	# use a regex to separate the stuff in brackets
-	tag: str|None; metadata: str|None; description: str|None
+	tag: str|None; metadata: str|None; description: str|None; chk_done: str|None
 	match: re.Match = DENDRON_EVENT_REGEX.match(event)
 	if match:
 		tag = match.group("tag")
 		metadata = match.group("metadata")
 		description = match.group("description")
+		chk_done = match.group("chk_done")
 
 		if metadata is None:
 			metadata = ""
@@ -338,9 +383,18 @@ def parse_dendron_event(event: str) -> dict|None:
 		else:
 			raise ValueError(f"Invalid metadata item: {item}")
 
+	# check doneness (metadata takes priority)
+	evnt_done: bool = False
+	if "done" in kvmap:
+		evnt_done = bool_str_parse(kvmap["done"])
+	elif chk_done is not None:
+		evnt_done = (chk_done == "[x]")
+
+	# combine and return
 	return {
 		"_tag": tag,
 		"_desc": description,
+		"_done": evnt_done,
 		**kvmap,
 		**{c: True for c in classes},
 		"_raw": event,
@@ -361,7 +415,7 @@ def find_dendron_events_from_file(
 	output: list[dict] = list()
 	with open(filename, "r", encoding="utf-8") as f:
 		for linnum, line in enumerate(f):
-			if any((tag in line) for tag in DENDRON_EVENT_TAGS):
+			if any((tag in line) for tag in CFG.DENDRON_EVENT_TAGS):
 				todo_idx_start: int = line.find("#todo")
 				event: dict|None = parse_dendron_event(line[todo_idx_start:])
 				if event is not None:
@@ -377,7 +431,7 @@ def glob_get_dendron_events(
 
 	output: list[dict] = list()
 	for filename in glob.glob(glob_pattern):
-		print(filename, file = sys.stderr)
+		print(f"reading: {filename}", file = sys.stderr)
 		try:
 			output.extend(find_dendron_events_from_file(filename))
 		except (UnicodeDecodeError, UnicodeError, FileNotFoundError, ValueError) as e:
@@ -464,27 +518,69 @@ def create_md_content(events: list[Event]) -> str:
 	return output
 
 
-def _test():
+def load_events_json(filename: str) -> list[Event]:
+	"""loads as json or jsonl depending on file extension"""
+
+	if filename.endswith(".json"):
+		with open(filename, "r", encoding="utf-8") as f:
+			return [Event.load(d) for d in json.load(f)]
+
+	elif filename.endswith(".jsonl"):
+		output: list[Event] = list()
+		with open(filename, "r", encoding="utf-8") as f:
+			for line in f:
+				output.append(Event.load(json.loads(line)))
+		return output
 
 
-	# print(process_gdrive_link(mylink))
+def general_loader(path: str, cfg_path: str|None = None) -> list[Event]:
+	"""given a path, determine whether it is a glob of markdown 
+	files or a processed json/jsonl file, and load
+	
+	also, load config from the specified file if given
+	"""
+	global CFG # pylint: ignore
 
-	# print(parse_dendron_event("#todo {.c1 .c2 k1=v1 k2=v2} description"))
-	# print(parse_dendron_event("#todo.x description2"))
+	if cfg_path is not None:
+		CFG = Config.load_file(cfg_path)
+	
 
-	# d = glob_get_dendron_events("../../vault/*.md")
-	d = glob_get_dendron_events("test.md")
+	if path.endswith(".json") or path.endswith(".jsonl"):
+		return load_events_json(path)
+	else:
+		data_raw: list[dict] = glob_get_dendron_events(path)
+		return [Event.from_de_dict(e) for e in data_raw]
+	
 
-	# for x in d:
-	# 	print(x, file = sys.stderr)
+def events_to_json(data_events: list[Event], jsonl: bool = False) -> str:
+	"""
+	Convert dendron events to json format, print to console
+	"""
+	data_json: list[dict] = json_serialize(data_events)
+	
+	if jsonl:
+		return "\n".join([json.dumps(d) for d in data_json])
+	else:
+		return json.dumps(data_json, indent="\t")
 
-	d_e = [Event.from_de_dict(e) for e in d]
+if __name__ == "__main__":
 
-	# for e in d_e:
-	# 	print(e, file = sys.stderr)
+	if any(
+			arg.lower().lstrip("-") in {"help", "h"} 
+			for arg in sys.argv
+		):
+		print(__doc__)
+		sys.exit(0)
 
-	# print(create_md_content(d_e))
-	print(create_ical_content(d_e))
+	import fire
+	fire.Fire({
+		"json": lambda path, cfg_path=None : events_to_json(general_loader(path, cfg_path)),
+		"jsonl": lambda path, cfg_path=None : events_to_json(general_loader(path, cfg_path), jsonl=True),
+		"ical": lambda path, cfg_path=None : create_ical_content(general_loader(path, cfg_path)),
+		"md": lambda path, cfg_path=None : create_md_content(general_loader(path, cfg_path)),
+		"markdown": lambda path, cfg_path=None : create_md_content(general_loader(path, cfg_path)),
+	})
 
 
-_test()
+
+
