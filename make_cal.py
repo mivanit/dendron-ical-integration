@@ -20,6 +20,7 @@ by [Michael Ivanitskiy](https://mivanit.github.io)
 from dataclasses import dataclass, asdict
 from functools import partial
 import json
+from pathlib import Path
 import sys
 from typing import Callable, Literal
 from datetime import datetime, timedelta, date, time
@@ -38,22 +39,37 @@ MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}._log]] **{title}**
     ```
 """
 
+def _markdown_output_process_path_dendron(s: str) -> str:
+	"""only leave the filename, strip `.md` extension and directory"""
+	return Path(s).stem
+	
+
+# only for sorting events -- events without date will always come after all other events
+DISTANT_FUTURE_TIME: datetime = datetime(year=2030, month=1, day=1)
+
 @dataclass
 class Config:
 	"""configuration for the script. meant to be used as a global variable"""
-	DENDRON_EVENT_TAGS: tuple[str] = ("#vtodo", "#vevent")
-	MARKDOWN_OUTPUT_FORMAT: str = MARKDOWN_OUTPUT_FORMAT
+	dendron_event_tags: tuple[str] = ("#vtodo", "#vevent")
+	exclude_if_true: tuple[str] = ("_done", "cancelled", "backlog") # checks for these keys in `event.data`
+	glob_regex_exclude: tuple[str] = tuple() # exclude a file if it matches
+	markdown_output_format: str = MARKDOWN_OUTPUT_FORMAT
 
 	@classmethod
 	def load(cls, data: dict) -> "Config":
 		return cls(
-			DENDRON_EVENT_TAGS = tuple(set(data.get("DENDRON_EVENT_TAGS", cls.DENDRON_EVENT_TAGS))),
-			MARKDOWN_OUTPUT_FORMAT = data.get("MARKDOWN_OUTPUT_FORMAT", cls.MARKDOWN_OUTPUT_FORMAT),
+			dendron_event_tags = tuple(set(data.get("dendron_event_tags", cls.dendron_event_tags))),
+			markdown_output_format = data.get("markdown_output_format", cls.markdown_output_format),
+			exclude_if_true = tuple(set(data.get("exclude_if_true", cls.exclude_if_true))),
+			glob_regex_exclude = tuple(set(data.get("glob_regex_exclude", cls.glob_regex_exclude))),
 		)
 
 	@classmethod
 	def load_file(cls, path: str) -> "Config":
-		with open(path) as f:
+		# print(f"reading config from: {path}", file = sys.stderr)
+		with open(path, encoding="utf-8") as f:
+			# text_raw: str = f.read()
+			# print(text_raw, file=sys.stderr)
 			data = json.load(f)
 		return cls.load(data)
 
@@ -91,8 +107,10 @@ def round_timedelta_minutes(td: timedelta) -> str:
 	dt: timedelta = timedelta(minutes = round(td.total_seconds() / 60))
 	return ":".join(str(dt).split(':')[:-1])
 
-def date_to_datetime(d: date|datetime) -> datetime:
-	if isinstance(d, datetime):
+def date_to_datetime(d: date|datetime|None) -> datetime|None:
+	if d is None:
+		return None
+	elif isinstance(d, datetime):
 		return d
 	elif isinstance(d, date):
 		return datetime.combine(d, time())
@@ -283,12 +301,12 @@ class Event:
 		else:
 			time_str = ""
 
-		return CFG.MARKDOWN_OUTPUT_FORMAT.format(
+		return CFG.markdown_output_format.format(
 			done_chk = "x" if self.done else " ",
 			tag = self.tag,
 			title = self.title,
 			description = self.description,
-			origin_file = self.data["_file"],
+			origin_file = _markdown_output_process_path_dendron(self.data["_file"]),
 			origin_line = self.data["_line"],
 			time_str = time_str,
 			data = self.data,
@@ -430,7 +448,7 @@ def find_dendron_events_from_file(
 	output: list[dict] = list()
 	with open(filename, "r", encoding="utf-8") as f:
 		for linnum, line in enumerate(f):
-			if any((tag in line) for tag in CFG.DENDRON_EVENT_TAGS):
+			if any((tag in line) for tag in CFG.dendron_event_tags):
 				event: dict|None = parse_dendron_event(line)
 				if event is not None:
 					event["_file"] = filename
@@ -443,13 +461,16 @@ def glob_get_dendron_events(
 		glob_pattern: str,
 	) -> list[dict]:
 
+	regexes_exclude: list[re.Pattern] = [re.compile(pattern) for pattern in CFG.glob_regex_exclude]
+
 	output: list[dict] = list()
 	for filename in glob.glob(glob_pattern):
-		print(f"reading: {filename}", file = sys.stderr)
-		try:
-			output.extend(find_dendron_events_from_file(filename))
-		except (UnicodeDecodeError, UnicodeError, FileNotFoundError, ValueError) as e:
-			print(f"Error reading {filename}: {e}")
+		if not any((regex.match(filename) for regex in regexes_exclude)):
+			# print(f"reading: {filename}", file = sys.stderr)
+			try:
+				output.extend(find_dendron_events_from_file(filename))
+			except (UnicodeDecodeError, UnicodeError, FileNotFoundError, ValueError) as e:
+				print(f"Error reading {filename}: {e}")
 
 	return output
 
@@ -545,7 +566,7 @@ def create_md_content(events: list[Event]) -> str:
 	# sort the events by time
 	tag_grouped_sorted: dict[str, list[Event]] = dict()
 	for tag, e_list in tag_grouped.items():
-		tag_grouped_sorted[tag] = sorted(e_list, key=lambda e: date_to_datetime(e.time_start))
+		tag_grouped_sorted[tag] = sorted(e_list, key=lambda e: date_to_datetime(e.time_start) if e.time_start is not None else DISTANT_FUTURE_TIME)
 
 	# create the output
 	output: str = "\n".join([
@@ -574,6 +595,17 @@ def load_events_json(filename: str) -> list[Event]:
 		return output
 
 
+def filter_events(events: list[Event], cfg: Config = CFG) -> list[Event]:
+	"""filters events according to the config"""
+	return [
+		e for e in events
+		if not any(
+			bool_str_parse(e.data.get(x, False))
+			for x in cfg.exclude_if_true
+		)
+	]
+
+
 def general_loader(path: str, cfg_path: str|None = None) -> list[Event]:
 	"""given a path, determine whether it is a glob of markdown 
 	files or a processed json/jsonl file, and load
@@ -584,13 +616,12 @@ def general_loader(path: str, cfg_path: str|None = None) -> list[Event]:
 
 	if cfg_path is not None:
 		CFG = Config.load_file(cfg_path)
-	
 
 	if path.endswith(".json") or path.endswith(".jsonl"):
-		return load_events_json(path)
+		return filter_events(load_events_json(path))
 	else:
 		data_raw: list[dict] = glob_get_dendron_events(path)
-		return [Event.from_de_dict(e) for e in data_raw]
+		return filter_events([Event.from_de_dict(e) for e in data_raw])
 	
 
 def events_to_json(data_events: list[Event], jsonl: bool = False) -> str:
@@ -613,6 +644,8 @@ if __name__ == "__main__":
 		print(__doc__)
 		sys.exit(0)
 
+	# print(sys.argv, file = sys.stderr)
+
 	import fire
 	fire.Fire({
 		"json": lambda path, cfg_path=None : events_to_json(general_loader(path, cfg_path)),
@@ -622,7 +655,6 @@ if __name__ == "__main__":
 		"markdown": lambda path, cfg_path=None : create_md_content(general_loader(path, cfg_path)),
 		"process_gdrive_link" : process_gdrive_link,
 	})
-
 
 
 
