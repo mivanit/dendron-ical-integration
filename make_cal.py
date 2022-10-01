@@ -20,6 +20,7 @@ by [Michael Ivanitskiy](https://mivanit.github.io)
 from dataclasses import dataclass, asdict
 from functools import partial
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Callable, Literal
@@ -31,13 +32,22 @@ import dateparser
 from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
 
 
-MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}._log]] **{title}**  
+MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}]] **{title}**  
     {description}  
-    *origin:* [[{origin_file}]] (line {origin_line})  {time_str}  
-    ```py
-    {data}
-    ```
+    *origin:* {origin_file_dendron} (line {origin_line})
+    *time:* {time_str_out}  
 """
+# ```py
+# {data}
+# ```
+
+ICAL_TITLE_FMT: str = "[{tag_stripped}] {title}"
+
+ICAL_DESCRIPTION_FMT: str = """{description}
+origin: {origin_vscode_link}
+time: {time_str_out} 
+"""
+
 
 def _markdown_output_process_path_dendron(s: str) -> str:
 	"""only leave the filename, strip `.md` extension and directory"""
@@ -54,14 +64,18 @@ class Config:
 	exclude_if_true: tuple[str] = ("_done", "cancelled", "backlog") # checks for these keys in `event.data`
 	glob_regex_exclude: tuple[str] = tuple() # exclude a file if it matches
 	markdown_output_format: str = MARKDOWN_OUTPUT_FORMAT
+	ical_title_fmt: str = ICAL_TITLE_FMT
+	ical_description_fmt: str = ICAL_DESCRIPTION_FMT
 
 	@classmethod
 	def load(cls, data: dict) -> "Config":
 		return cls(
 			dendron_event_tags = tuple(set(data.get("dendron_event_tags", cls.dendron_event_tags))),
-			markdown_output_format = data.get("markdown_output_format", cls.markdown_output_format),
 			exclude_if_true = tuple(set(data.get("exclude_if_true", cls.exclude_if_true))),
 			glob_regex_exclude = tuple(set(data.get("glob_regex_exclude", cls.glob_regex_exclude))),
+			markdown_output_format = data.get("markdown_output_format", cls.markdown_output_format),
+			ical_title_fmt = data.get("ical_title_fmt", cls.ical_title_fmt),
+			ical_description_fmt = data.get("ical_description_fmt", cls.ical_description_fmt),
 		)
 
 	@classmethod
@@ -158,12 +172,37 @@ class Event:
 	allday: bool = False
 	done: bool = False
 
+	# derived properties
 	@property
 	def time_end(self) -> datetime:
 		if self.duration is None:
 			return self.time_start
 		else:
 			return self.time_start + self.duration
+
+	@property
+	def time_str_out(self) -> str:
+		time_str: str
+		if self.time_start is not None:
+			if self.allday:
+				time_str = self.time_start.strftime("%Y-%m-%d") + " (all day)"
+			else:
+				if self.time_start.date() == self.time_end.date():
+					time_str = self.time_start.strftime("%Y-%m-%d %H:%M") + f" to " + self.time_end.strftime("%H:%M")
+				else:
+					time_str = self.time_start.strftime("%Y-%m-%d %H:%M") + f" to " + self.time_end.strftime("%Y-%m-%d %H:%M")
+				time_str += f" (duration: {round_timedelta_minutes(self.duration)})"
+		else:
+			time_str = "(no time specified)"
+		
+		return time_str
+
+	done_chk = property(lambda self: "[x]" if self.done else "[ ]")
+	origin_file = property(lambda self: Path(self.data["_file"]).as_posix())
+	origin_file_dendron = property(lambda self: _markdown_output_process_path_dendron(self.data["_file"]))
+	origin_line = property(lambda self: self.data["_line"])
+	origin_vscode_link = property(lambda self: f"vscode://file/{Path(os.getcwd()) / self.origin_file}:{self.origin_line}")
+	tag_stripped = property(lambda self: ".".join(self.tag.split(".")[1:]) if self.tag is not None else None)
 
 	@classmethod
 	def from_de_dict(cls, data: dict, default_duration: timedelta = parse_as_delta("30 min")) -> "Event":
@@ -216,7 +255,7 @@ class Event:
 				time_start = time_start.date()
 
 			if duration is not None:
-				duration_days: int = timedelta(days=duration.days)
+				duration_days: timedelta = timedelta(days=duration.days)
 				if duration_days != 0:
 					duration = duration_days
 
@@ -265,7 +304,7 @@ class Event:
 		)
 
 	def get_uid(self) -> str:
-		return f"{self.data['_file']}:{self.data['_line']}"
+		return f"{Path(self.data['_file']).as_posix()}:{self.data['_line']}"
 
 	def to_ical_dict(self) -> dict:
 		"""serialize to ical-compatible dict"""
@@ -278,8 +317,8 @@ class Event:
 			"DTEND" : ical_datetime_format(self.time_end) if self.time_start is not None else today_date_str,
 			# "CREATED" : ical_datetime_format(datetime.now()),
 			# "LAST_MODIFIED" : ical_datetime_format(datetime.now()),
-			"SUMMARY" : self.title,
-			"DESCRIPTION" : self.description,
+			"SUMMARY" : CFG.ical_title_fmt.format(**self.serialize()),
+			"DESCRIPTION" : CFG.ical_description_fmt.format(**self.serialize()),
 			"SEQUENCE" : 0,
 			"TRANSP" : "OPAQUE",
 			"STATUS" : "CONFIRMED",
@@ -287,47 +326,46 @@ class Event:
 
 	def to_md_str(self) -> str:
 		"""serialize for writing to markdown log file"""
-		time_str: str
-		if self.time_start is not None:
-			if self.allday:
-				time_str = self.time_start.strftime("%Y-%m-%d") + " (all day)"
-			else:
-				if self.time_start.date() == self.time_end.date():
-					time_str = self.time_start.strftime("%Y-%m-%d %H:%M") + f" to " + self.time_end.strftime("%H:%M")
-				else:
-					time_str = self.time_start.strftime("%Y-%m-%d %H:%M") + f" to " + self.time_end.strftime("%Y-%m-%d %H:%M")
-				time_str += f" (duration: {round_timedelta_minutes(self.duration)})"
-			time_str = f"\n    *time:* " + time_str + "  \n"
-		else:
-			time_str = ""
+		return CFG.markdown_output_format.format(**self.serialize())
 
-		return CFG.markdown_output_format.format(
-			done_chk = "x" if self.done else " ",
-			tag = self.tag,
-			title = self.title,
-			description = self.description,
-			origin_file = _markdown_output_process_path_dendron(self.data["_file"]),
-			origin_line = self.data["_line"],
-			time_str = time_str,
-			data = self.data,
-		)
 
 Event.serialize = dataclass_serializer_factory(
 	Event,
 	{
+		# times
 		"time_start" : lambda self: date_to_datetime(self.time_start).timestamp() if self.time_start is not None else None,
 		"time_start_readable" : lambda self: date_to_datetime(self.time_start).isoformat() if self.time_start is not None else None,
 		"duration" : lambda self: self.duration.total_seconds() if self.duration is not None else None,
 		"duration_readable" : lambda self: str(self.duration) if self.duration is not None else None,
 		"time_end" : lambda self: date_to_datetime(self.time_end).timestamp() if self.time_end is not None else None,
 		"time_end_readable" : lambda self: date_to_datetime(self.time_end).isoformat() if self.time_end is not None else None,
+		# properties
+		"time_str_out" : lambda self: self.time_str_out,
+		"done_chk" : lambda self: self.done_chk,
+		"origin_file" : lambda self: self.origin_file,
+		"origin_file_dendron" : lambda self: self.origin_file_dendron,
+		"origin_line" : lambda self: self.origin_line,
+		"origin_vscode_link" : lambda self: self.origin_vscode_link,
+		"tag_stripped" : lambda self: self.tag_stripped,
 	},
 ) 
+
+def _time_start_loader(data: dict) -> datetime|date:
+	timestamp: float|None = data["time_start"]
+	if timestamp is None:
+		return None
+	else:
+		dt: datetime = datetime.fromtimestamp(timestamp)
+		# if it's an all-day event, return a date
+		if data["allday"]:
+			return dt.date()
+		else:
+			return dt
 
 Event.load = dataclass_loader_factory(
 	Event,
 	{
-		"time_start" : lambda data: datetime.fromtimestamp(data["time_start"]) if data["time_start"] is not None else None,
+		"time_start" : _time_start_loader,
 		"duration" : lambda data: timedelta(seconds=data["duration"]) if data["duration"] is not None else None,
 	},
 	# TODO: some validation?
