@@ -32,9 +32,9 @@ import dateparser
 from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
 
 
-MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] [[{tag}]] **{title}**  
+MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] {tag} **{title}**  
     {description}  
-    *origin:* {origin_file_dendron} (line {origin_line})
+    *origin:* [[{origin_file_dendron}]] (line {origin_line})
     *time:* {time_str_out}  
 """
 # ```py
@@ -197,11 +197,12 @@ class Event:
 		
 		return time_str
 
-	done_chk = property(lambda self: "[x]" if self.done else "[ ]")
+	done_chk = property(lambda self: "x" if self.done else " ")
 	origin_file = property(lambda self: Path(self.data["_file"]).as_posix())
 	origin_file_dendron = property(lambda self: _markdown_output_process_path_dendron(self.data["_file"]))
 	origin_line = property(lambda self: self.data["_line"])
 	origin_vscode_link = property(lambda self: f"vscode://file/{Path(os.getcwd()) / self.origin_file}:{self.origin_line}")
+	tag_dendron = property(lambda self: f"tags.{self.tag.lstrip('#')}" if self.tag is not None else None)
 	tag_stripped = property(lambda self: ".".join(self.tag.split(".")[1:]) if self.tag is not None else None)
 
 	@classmethod
@@ -346,6 +347,7 @@ Event.serialize = dataclass_serializer_factory(
 		"origin_file_dendron" : lambda self: self.origin_file_dendron,
 		"origin_line" : lambda self: self.origin_line,
 		"origin_vscode_link" : lambda self: self.origin_vscode_link,
+		"tag_dendron" : lambda self: self.tag_dendron,
 		"tag_stripped" : lambda self: self.tag_stripped,
 	},
 ) 
