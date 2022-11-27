@@ -668,7 +668,7 @@ def events_to_json(data_events: list[Event], jsonl: bool = False) -> str:
 	"""
 	Convert dendron events to json format, print to console
 	"""
-	data_json: list[dict] = json_serialize(data_events)
+	data_json: list[dict] = [d.serialize() for d in data_events]
 	
 	if jsonl:
 		return "\n".join([json.dumps(d) for d in data_json])
