@@ -16,4 +16,9 @@
 
 - [x] #todo {due="2022-09-30"} this, thing; has weird characters | more weird chars: ! @ # $ % ^ & * ( ) _ + - = [ ] : ; " ' < > , . ? / \ | ` ~
 
+- #todo {done="1969-12-31"} this task was done before the dawn of time
 
+- [ ] #todo.multiline {due="today"} this is a multiline todo |
+	- thing 1
+	- thing 2
+	An equation: $E = m c^2$
