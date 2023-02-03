@@ -27,8 +27,10 @@ from typing import Callable, Literal
 from datetime import datetime, timedelta, date, time
 import re
 import glob
+import warnings
 
 import dateparser
+import regex
 from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
 
 
@@ -48,6 +50,8 @@ origin: {origin_vscode_link}
 time: {time_str_out} 
 """
 
+def to_ascii(s: str) -> str:
+	return s.encode('ascii',errors='ignore').decode()
 
 def _markdown_output_process_path_dendron(s: str) -> str:
 	"""only leave the filename, strip `.md` extension and directory"""
@@ -100,16 +104,30 @@ def process_gdrive_link(link: str) -> str:
 
 
 def parse_as_delta(s: str) -> timedelta:
-	return datetime.now() - dateparser.parse(s)
+	"""given a string like "30 min" return the appropriate timedelta
+	
+	uses `dateparser` package"""
+	s = to_ascii(s)
+	try:
+		return datetime.now() - dateparser.parse(s)
+	except regex._regex_core.error as e:
+		warnings.warn(f"couldn't parse as delta: {s}")
+		return timedelta(hours=1)
 
 def custom_dateparse(s: str) -> date|datetime:
 	"""Parse a date string using dateparser, with special handler for "today" """
+	s = to_ascii(s)
 	if s.lower() in {"today", "tod"}:
 		return datetime.now().date()
 	elif s.lower() in {"tomorrow", "tom", "tmro", "tmr"}:
 		return datetime.now().date() + timedelta(days=1)
 	else:
-		dt: datetime = dateparser.parse(s)
+		dt: datetime 
+		try:
+			dt = dateparser.parse(s)
+		except regex._regex_core.error as e:
+			warnings.warn(f"couldn't parse: {s}")
+			dt = datetime.now()
 		if (dt.hour == 0 and dt.minute == 0 and dt.second == 0):
 			# assume its just a date
 			return dt.date()
