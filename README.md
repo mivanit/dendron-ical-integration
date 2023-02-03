@@ -20,7 +20,7 @@ writing to the file should be done via a shell redirect, for example:
 
 # Setup
 
-I reccomend setting up a bash script (see `run_all.sh`) to run this script regularly on your Dendron vault, and then upload the resulting ical file somewhere.
+I reccomend setting up a bash script (see `run_all.sh` for the tests) to run this script regularly on your Dendron vault, and then upload the resulting ical file somewhere.
 
 I do this by having the script place the ical file into a folder that is synced to Google drive, which then automatically uploads the file which can be viewed via a shared link.
 
@@ -32,3 +32,11 @@ Note: Google calendar only pulls from the ical link you give it once every day o
 ical file format spec: https://datatracker.ietf.org/doc/html/rfc5545
 
 by [Michael Ivanitskiy](https://mivanit.github.io)
+
+
+## feature roadmap
+
+- [x] scrape events from dendron vault
+- [x] output to ical, other formals
+- [x] support for multi-line todos
+- [ ] better control for filtering todos

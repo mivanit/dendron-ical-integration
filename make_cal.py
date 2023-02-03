@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, date, time
 import re
 import glob
 import warnings
+import textwrap
 
 import dateparser
 import regex
@@ -61,7 +62,7 @@ def _markdown_output_process_path_dendron(s: str) -> str:
 # only for sorting events -- events without date will always come after all other events
 DISTANT_FUTURE_TIME: datetime = datetime(year=2030, month=1, day=1)
 
-@dataclass
+@dataclass(kw_only=True)
 class Config:
 	"""configuration for the script. meant to be used as a global variable"""
 	dendron_event_tags: tuple[str] = ("#vtodo", "#vevent")
@@ -70,6 +71,7 @@ class Config:
 	markdown_output_format: str = MARKDOWN_OUTPUT_FORMAT
 	ical_title_fmt: str = ICAL_TITLE_FMT
 	ical_description_fmt: str = ICAL_DESCRIPTION_FMT
+	description_delimiter: str = '|'
 
 	@classmethod
 	def load(cls, data: dict) -> "Config":
@@ -80,6 +82,7 @@ class Config:
 			markdown_output_format = data.get("markdown_output_format", cls.markdown_output_format),
 			ical_title_fmt = data.get("ical_title_fmt", cls.ical_title_fmt),
 			ical_description_fmt = data.get("ical_description_fmt", cls.ical_description_fmt),
+			description_delimiter = data.get("description_delimiter", cls.description_delimiter),
 		)
 
 	@classmethod
@@ -150,7 +153,7 @@ def date_to_datetime(d: date|datetime|None) -> datetime|None:
 		raise TypeError(f"Invalid type for to_datetime: {type(d) = } {d = }")
 
 
-def bool_str_parse(s: str|int|bool) -> bool:
+def bool_str_parse(s: str|int|bool, none_if_unknown: bool = False) -> bool|None:
 	if isinstance(s, (int, bool)):
 		return bool(s)
 	elif isinstance(s, str):
@@ -159,7 +162,10 @@ def bool_str_parse(s: str|int|bool) -> bool:
 		elif s.lower() in {'false', '0', 'n', 'no'}:
 			return False
 		else:
-			raise ValueError(f"Invalid boolean string: {s}")
+			if none_if_unknown:
+				return None
+			else:
+				raise ValueError(f"Invalid boolean string: {s}")
 	else:
 		raise TypeError(f"Invalid type for bool_str_parse: {type(s) = } {s = }")
 
@@ -286,17 +292,23 @@ class Event:
 
 		# parse title/description
 		# ========================================
+		# note: some of this logic happens in `find_dendron_events_from_file()` since we might have to grab multiple lines
 		title: str; description: str
-		if "title" in data:
+		if ("title" in data) and ("description" in data):
+			# if both, set them
 			title = data["title"]
-			description = data["_desc"]
-		elif '|' in data["_desc"]:
+			description = data["description"]
+		elif ("title" in data) or ("description" in data):
+			# if just one, something is wrong
+			raise ValueError(f"Either both title and description must be specified, or neither. {data = }")
+		elif CFG.description_delimiter in data["_content"]:
 			# split it carefully in case there is more than one
-			mid_idx: int = data["_desc"].index('|')
-			title = data["_desc"][:mid_idx]
-			description = data["_desc"][mid_idx+1:]
+			mid_idx: int = data["_content"].index(CFG.description_delimiter)
+			title = data["_content"][:mid_idx]
+			description = data["_content"][mid_idx+1:]
 		else:
-			title = data["_desc"]
+			# if neither, assume it's all the title
+			title = data["_content"]
 			description = "(no description)"
 
 
@@ -391,15 +403,15 @@ Event.load = dataclass_loader_factory(
 	# TODO: some validation?
 )
 
-DENDRON_EVENT_REGEX: re.Pattern = re.compile(r"^(?P<before>.*?)(?P<chk_done>\[[ x]\])?\s*(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<description>.*)$")  # thx copilot :)
+DENDRON_EVENT_REGEX: re.Pattern = re.compile(r"^(?P<before>.*?)(?P<chk_done>\[[ x]\])?\s*(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<content>.*)$")  # thx copilot :)
 """
-`--- [x] #todo.subtag {.c1 .c2 k1=v1 k2=v2} description`
+`--- [x] #todo.subtag {.c1 .c2 k1=v1 k2=v2} content`
 will map to
 before = "--- "
 chk_done = "[x]"
 tag = "#todo.subtag"
 metadata = ".class .class key=value key=value" 
-description = "description"
+content = "content"
 
 note:
  - metadata is optional, but always in brackets if present
@@ -411,7 +423,7 @@ note:
 def parse_dendron_event(event: str) -> dict|None:
 	"""
 	```
-	#todo {.class .class key=value key=value} description
+	#todo {.class .class key=value key=value} content
 	```
 
 	### Parameters:
@@ -420,17 +432,17 @@ def parse_dendron_event(event: str) -> dict|None:
 	### Returns:
 	`dict`	
 	- `_tag` will be the tag
-	- `_desc` will be the description
-	classes present will map to True
+	- `_content` will be the content
+	classes present will map to True in the dict of key/value pairs
 	"""	
 
 	# use a regex to separate the stuff in brackets
-	tag: str|None; metadata: str|None; description: str|None; chk_done: str|None
+	tag: str|None; metadata: str|None; content: str|None; chk_done: str|None
 	match: re.Match = DENDRON_EVENT_REGEX.match(event)
 	if match:
 		tag = match.group("tag")
 		metadata = match.group("metadata")
-		description = match.group("description")
+		content = match.group("content")
 		chk_done = match.group("chk_done")
 
 		if metadata is None:
@@ -438,8 +450,8 @@ def parse_dendron_event(event: str) -> dict|None:
 		else:
 			metadata = metadata[1:-1] # strip curly braces
 
-		if description is None:
-			description = ""
+		if content is None:
+			content = ""
 				
 	else:
 		return None
@@ -474,8 +486,16 @@ def parse_dendron_event(event: str) -> dict|None:
 
 	# check doneness (metadata takes priority)
 	evnt_done: bool = False
+	time_done: datetime|None = None
 	if "done" in kvmap:
-		evnt_done = bool_str_parse(kvmap["done"])
+		parsing_done: bool|None = bool_str_parse(kvmap["done"], none_if_unknown=True)
+		if isinstance(parsing_done, bool):
+			evnt_done = parsing_done
+		else:
+			# assume it's a date, if its not a bool
+			evnt_done = True
+			time_done = custom_dateparse(kvmap["done"])
+
 	elif "done" in classes:
 		evnt_done = True
 	elif chk_done is not None:
@@ -484,8 +504,9 @@ def parse_dendron_event(event: str) -> dict|None:
 	# combine and return
 	return {
 		"_tag": tag,
-		"_desc": description,
+		"_content": content,
 		"_done": evnt_done,
+		"_time_done": time_done,
 		**kvmap,
 		**{c: True for c in classes},
 		"_raw": event,
@@ -494,23 +515,44 @@ def parse_dendron_event(event: str) -> dict|None:
 def find_dendron_events_from_file(
 		filename: str,
 		allow_tag_mid_line: bool = False,
-		descripton_append_until_emptyline: bool = False,
 	) -> list[dict]:
+	"""reads a dendron-markdown file, gets all events from it"""
 
 	if allow_tag_mid_line:
 		raise NotImplementedError("allow_tag_mid_line not implemented")
 
-	if descripton_append_until_emptyline:
-		raise NotImplementedError("descripton_append_until_emptyline not implemented")
-
 	output: list[dict] = list()
 	with open(filename, "r", encoding="utf-8") as f:
-		for linnum, line in enumerate(f):
+		# iterate over *array* with all lines, since we might need to grab the lines
+		data: list[str] = list(f.readlines())
+		for linenum, line in enumerate(data):
+			# check for any valid tags
 			if any((tag in line) for tag in CFG.dendron_event_tags):
 				event: dict|None = parse_dendron_event(line)
 				if event is not None:
+					# get info about file location
 					event["_file"] = filename
-					event["_line"] = linnum + 1
+					event["_line"] = linenum + 1
+
+					# if ends with CFG.description_delimiter, them get all lines until the next empty line
+					if line.rstrip().endswith(CFG.description_delimiter):
+						event["title"] = event["_content"].rstrip().rstrip(CFG.description_delimiter).rstrip()
+						desc_lines: list[str] = list()
+						for i in range(linenum + 1, len(data)):
+							if data[i].strip() == "":
+								break
+							desc_lines.append(data[i])
+
+						if len(desc_lines) > 0:
+							# find and strip any *common* leading whitespace/indentation using textwrap.dedent
+							desc_lines = textwrap.dedent("".join(desc_lines)).splitlines()
+							# format and store to a string in the dict
+							# NOTE: this is fragile -- if you change the markdown format, it might not look quite right
+							event["description"] = "".join([
+								f"\n    {dl}  "
+								for dl in desc_lines
+							])
+
 					output.append(event)
 
 	return output
@@ -528,7 +570,7 @@ def glob_get_dendron_events(
 			try:
 				output.extend(find_dendron_events_from_file(filename))
 			except (UnicodeDecodeError, UnicodeError, FileNotFoundError, ValueError) as e:
-				print(f"Error reading {filename}: {e}")
+				warnings.warn(f"Error reading {filename}: {e}")
 
 	return output
 

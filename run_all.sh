@@ -1,6 +1,6 @@
 RUN_SCRIPT="py make_cal.py"
 SOURCE_GLOB="test/source/*.md"
-CONFIG_PATH="test/cfg.json"
+CONFIG_PATH="test/source/cfg.json"
 OUTPUT_DIR="test/output"
 
 # jsonl/jsonl from source
