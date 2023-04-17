@@ -34,6 +34,9 @@ import dateparser
 import regex
 from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
 
+def warn(message: str) -> None:
+	# warnings.warn(message)
+	print(message, file=sys.stderr)
 
 MARKDOWN_OUTPUT_FORMAT: str = """ - [{done_chk}] {tag} **{title}**  
     {description}  
@@ -114,7 +117,7 @@ def parse_as_delta(s: str) -> timedelta:
 	try:
 		return datetime.now() - dateparser.parse(s)
 	except regex._regex_core.error as e:
-		warnings.warn(f"couldn't parse as delta: {s}")
+		warn(f"couldn't parse as delta: {s}")
 		return timedelta(hours=1)
 
 def custom_dateparse(s: str) -> date|datetime:
@@ -129,7 +132,11 @@ def custom_dateparse(s: str) -> date|datetime:
 		try:
 			dt = dateparser.parse(s)
 		except regex._regex_core.error as e:
-			warnings.warn(f"couldn't parse: {s}")
+			warn(f"regex._regex_core.error: couldn't parse: '{s}'\n{e}")
+		except Exception as e:
+			warn(f"unknown error: couldn't parse: '{s}'\n{e}")
+		if dt is None:
+			warn(f"got datetime as None for '{s}' in custom_dateparse, setting to datetime.now()")
 			dt = datetime.now()
 		if (dt.hour == 0 and dt.minute == 0 and dt.second == 0):
 			# assume its just a date
@@ -570,7 +577,7 @@ def glob_get_dendron_events(
 			try:
 				output.extend(find_dendron_events_from_file(filename))
 			except (UnicodeDecodeError, UnicodeError, FileNotFoundError, ValueError) as e:
-				warnings.warn(f"Error reading {filename}: {e}")
+				warn(f"Error reading {filename}: {e}")
 
 	return output
 
