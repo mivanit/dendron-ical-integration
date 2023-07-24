@@ -32,7 +32,8 @@ import textwrap
 
 import dateparser
 import regex
-from muutils.json_serialize import json_serialize, dataclass_loader_factory, dataclass_serializer_factory
+from muutils.json_serialize import json_serialize
+from muutils.json_serialize.dataclass_factories import dataclass_loader_factory, dataclass_serializer_factory
 
 def warn(message: str) -> None:
 	# warnings.warn(message)
