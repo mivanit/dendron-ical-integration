@@ -8,12 +8,12 @@
  - [ ] #todo **do this today!**  
     no, seriously, do it today  
     *origin:* [[test]] (line 3)
-    *time:* 2023-02-02 (all day)  
+    *time:* 2023-07-24 (all day)  
 
  - [ ] #todo **do tmro**  
     this can wait  
     *origin:* [[test]] (line 5)
-    *time:* 2023-02-03 (all day)  
+    *time:* 2023-07-25 (all day)  
 
  - [ ] #todo **all day today**  
     a description  
@@ -36,5 +36,5 @@
     - thing 2  
     An equation: $E = m c^2$  
     *origin:* [[test]] (line 21)
-    *time:* 2023-02-02 (all day)  
+    *time:* 2023-07-24 (all day)  
 
