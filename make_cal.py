@@ -536,7 +536,11 @@ def find_dendron_events_from_file(
 		for linenum, line in enumerate(data):
 			# check for any valid tags
 			if any((tag in line) for tag in CFG.dendron_event_tags):
-				event: dict|None = parse_dendron_event(line)
+				try:
+					event: dict|None = parse_dendron_event(line)
+				except ValueError as e:
+					warnings.warn(f"Error parsing {filename}:{linenum + 1}\n{e}")
+					event = None
 				if event is not None:
 					# get info about file location
 					event["_file"] = filename
