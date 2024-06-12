@@ -17,7 +17,7 @@ ical file format spec: https://datatracker.ietf.org/doc/html/rfc5545
 by [Michael Ivanitskiy](https://mivanit.github.io)
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from functools import partial
 import json
 import os
@@ -32,8 +32,7 @@ import textwrap
 
 import dateparser
 import regex
-from muutils.json_serialize import json_serialize
-from muutils.json_serialize.dataclass_factories import dataclass_loader_factory, dataclass_serializer_factory
+from muutils.json_serialize import json_serialize, SerializableDataclass, serializable_dataclass, serializable_field
 
 def warn(message: str) -> None:
 	# warnings.warn(message)
@@ -66,16 +65,16 @@ def _markdown_output_process_path_dendron(s: str) -> str:
 # only for sorting events -- events without date will always come after all other events
 DISTANT_FUTURE_TIME: datetime = datetime(year=2030, month=1, day=1)
 
-@dataclass(kw_only=True)
-class Config:
+@serializable_dataclass(kw_only=True)
+class Config(SerializableDataclass):
 	"""configuration for the script. meant to be used as a global variable"""
-	dendron_event_tags: tuple[str] = ("#vtodo", "#vevent")
-	exclude_if_true: tuple[str] = ("_done", "cancelled", "backlog") # checks for these keys in `event.data`
-	glob_regex_exclude: tuple[str] = tuple() # exclude a file if it matches
-	markdown_output_format: str = MARKDOWN_OUTPUT_FORMAT
-	ical_title_fmt: str = ICAL_TITLE_FMT
-	ical_description_fmt: str = ICAL_DESCRIPTION_FMT
-	description_delimiter: str = '|'
+	dendron_event_tags: tuple[str] = serializable_field(default=("#vtodo", "#vevent"))
+	exclude_if_true: tuple[str] = serializable_field(default=("_done", "cancelled", "backlog")) # checks for these keys in `event.data`
+	glob_regex_exclude: tuple[str] = serializable_field(default=tuple()) # exclude a file if it matches
+	markdown_output_format: str = serializable_field(default=MARKDOWN_OUTPUT_FORMAT)
+	ical_title_fmt: str = serializable_field(default=ICAL_TITLE_FMT)
+	ical_description_fmt: str = serializable_field(default=ICAL_DESCRIPTION_FMT)
+	description_delimiter: str = serializable_field(default='|')
 
 	@classmethod
 	def load(cls, data: dict) -> "Config":
@@ -192,17 +191,38 @@ def ical_datetime_format(dt: datetime|date) -> str:
 	else:
 		raise TypeError(f"Invalid type for ical_datetime_format: {type(dt) = } {dt = }")
 
-@dataclass(kw_only=True)
-class Event:
+@serializable_dataclass(
+	kw_only=True,
+	properties_to_serialize=[
+		"time_str_out",
+		"done_chk",
+		"origin_file",
+		"origin_file_dendron",
+		"origin_line",
+		"origin_vscode_link",
+		"tag_dendron",
+		"tag_stripped",
+		"time_start_readable",
+		"duration_readable",
+		"time_end_readable",
+	],
+)
+class Event(SerializableDataclass):
 	"""general event class"""
-	time_start: datetime|date|None
-	duration: timedelta|None
-	title: str
-	description: str
-	tag: str|None = None
-	data: dict|None = None
-	allday: bool = False
-	done: bool = False
+	time_start: datetime|date|None = serializable_field(
+		serialization_fn = lambda d: d.isoformat() if d is not None else None,
+		loading_fn = lambda d: custom_dateparse(d["time_start"]) if d.get("time_start", None) is not None else None,
+	)
+	duration: timedelta|None = serializable_field(
+		serialization_fn = lambda d: d.total_seconds() if d is not None else None,
+		loading_fn = lambda d: timedelta(seconds=d["duration"]) if d.get("duration", None) is not None else None,
+	)
+	title: str = serializable_field()
+	description: str = serializable_field()
+	tag: str|None = serializable_field(default=None)
+	data: dict|None = serializable_field(default=None)
+	allday: bool = serializable_field(default=False)
+	done: bool = serializable_field(default=False)
 
 	# derived properties
 	@property
@@ -236,6 +256,10 @@ class Event:
 	origin_vscode_link = property(lambda self: f"vscode://file/{Path(os.getcwd()) / self.origin_file}:{self.origin_line}")
 	tag_dendron = property(lambda self: f"tags.{self.tag.lstrip('#')}" if self.tag is not None else None)
 	tag_stripped = property(lambda self: ".".join(self.tag.split(".")[1:]) if self.tag is not None else None)
+
+	time_start_readable = property(lambda self: date_to_datetime(self.time_start).isoformat() if self.time_start is not None else None)
+	duration_readable = property(lambda self: str(self.duration) if self.duration is not None else None)
+	time_end_readable = property(lambda self: date_to_datetime(self.time_end).isoformat() if self.time_end is not None else None)
 
 	@classmethod
 	def from_de_dict(cls, data: dict, default_duration: timedelta = parse_as_delta("30 min")) -> "Event":
@@ -368,28 +392,6 @@ class Event:
 		return CFG.markdown_output_format.format(**self.serialize())
 
 
-Event.serialize = dataclass_serializer_factory(
-	Event,
-	{
-		# times
-		"time_start" : lambda self: date_to_datetime(self.time_start).timestamp() if self.time_start is not None else None,
-		"time_start_readable" : lambda self: date_to_datetime(self.time_start).isoformat() if self.time_start is not None else None,
-		"duration" : lambda self: self.duration.total_seconds() if self.duration is not None else None,
-		"duration_readable" : lambda self: str(self.duration) if self.duration is not None else None,
-		"time_end" : lambda self: date_to_datetime(self.time_end).timestamp() if self.time_end is not None else None,
-		"time_end_readable" : lambda self: date_to_datetime(self.time_end).isoformat() if self.time_end is not None else None,
-		# properties
-		"time_str_out" : lambda self: self.time_str_out,
-		"done_chk" : lambda self: self.done_chk,
-		"origin_file" : lambda self: self.origin_file,
-		"origin_file_dendron" : lambda self: self.origin_file_dendron,
-		"origin_line" : lambda self: self.origin_line,
-		"origin_vscode_link" : lambda self: self.origin_vscode_link,
-		"tag_dendron" : lambda self: self.tag_dendron,
-		"tag_stripped" : lambda self: self.tag_stripped,
-	},
-) 
-
 def _time_start_loader(data: dict) -> datetime|date:
 	timestamp: float|None = data["time_start"]
 	if timestamp is None:
@@ -402,16 +404,11 @@ def _time_start_loader(data: dict) -> datetime|date:
 		else:
 			return dt
 
-Event.load = dataclass_loader_factory(
-	Event,
-	{
-		"time_start" : _time_start_loader,
-		"duration" : lambda data: timedelta(seconds=data["duration"]) if data["duration"] is not None else None,
-	},
-	# TODO: some validation?
-)
 
-DENDRON_EVENT_REGEX: re.Pattern = re.compile(r"^(?P<before>.*?)(?P<chk_done>\[[ x]\])?\s*(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<content>.*)$")  # thx copilot :)
+
+DENDRON_EVENT_REGEX: re.Pattern = re.compile(
+	r"^(?P<before>.*?)(?P<chk_done>\[[ x]\])?\s*(?P<tag>\#\w+(\.\w+)*)\s*(?P<metadata>\{.*\})?\s*(?P<content>.*)$"
+)  # thx copilot :)
 """
 `--- [x] #todo.subtag {.c1 .c2 k1=v1 k2=v2} content`
 will map to

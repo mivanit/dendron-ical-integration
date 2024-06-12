@@ -1,2 +1,2 @@
 dateparser
-muutils
+muutils>=0.5.12
