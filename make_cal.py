@@ -674,15 +674,14 @@ def glob_get_dendron_events(
 
 
 def ical_process_value(s: str | int | float) -> str:
-	"""
-	Process a string to be safe for icalendar
+	"""Process a string to be safe for icalendar
 
 	from https://datatracker.ietf.org/doc/html/rfc5545, pg 45:
 
 	```
-	ESCAPED-CHAR = ("\\" / "\;" / "\," / "\n")
-			 ; \\ encodes \, \n encodes newline
-			 ; \; encodes ;, \, encodes ,
+	ESCAPED_CHAR = ("\\\\" / "\\;" / "\\," / "\\N" / "\\n")
+		; \\\\ encodes \\, \\N or \\n encodes newline
+		; \\; encodes ;, \\, encodes ,
 	```
 
 	note: we never emit newlines with capital N because this causes problems for python.
