@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "dendron-ical-integration"
+version = "0.1.0"
+description = ""
+authors = ["Michael Ivanitskiy <mivanits@umich.edu>"]
+readme = "README.md"
+packages = [{include = "make_cal.py"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+dateparser = "^1.2.0"
+muutils = "^0.5.12"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff.format]
+indent-style = 'tab'
